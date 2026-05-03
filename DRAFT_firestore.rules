@@ -1,0 +1,97 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 2. Validation Helpers
+    function isValidProduct(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.price is number && data.price > 0 &&
+             data.stock is int && data.stock >= 0 &&
+             data.category is string &&
+             data.keys().hasAll(['name', 'price', 'stock', 'category']) &&
+             data.keys().size() >= 4;
+    }
+
+    function isValidUserProfile(data) {
+      return data.email is string && data.email.size() > 0 &&
+             data.role in ['customer', 'admin'] &&
+             data.keys().hasAll(['email', 'role']) &&
+             (data.id == request.auth.uid || !data.keys().contains('id'));
+    }
+
+    function isValidOrder(data) {
+      return data.userId == request.auth.uid &&
+             data.total is number && data.total >= 0 &&
+             data.status in ['pending', 'processing', 'shipped', 'delivered', 'cancelled'] &&
+             data.items is list && data.items.size() > 0;
+    }
+
+    // 3. Collection Rules
+    
+    // Products: Anyone can read, only admin can write
+    match /products/{productId} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isValidProduct(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // Categories: Anyone can read, only admin can write
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow create, update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Users: Users can read/write their own profiles, but cannot escalate role
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUserProfile(incoming()) && incoming().role == 'customer';
+      allow update: if isOwner(userId) && 
+                      isValidUserProfile(incoming()) && 
+                      incoming().role == existing().role && // Cannot change own role
+                      incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'wishlist', 'address', 'updatedAt']);
+      allow update: if isAdmin();
+    }
+
+    // Orders: Users can read/create their own orders, only admin can update status
+    match /orders/{orderId} {
+      allow read: if isOwner(existing().userId) || isAdmin();
+      allow create: if isSignedIn() && isValidOrder(incoming());
+      allow update: if isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+    }
+
+    // Analytics: Only admin can access
+    match /analytics/{date} {
+      allow read, write: if isAdmin();
+    }
+  }
+}
